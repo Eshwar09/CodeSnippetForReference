@@ -1,0 +1,544 @@
+
+    public BenefitVersionDto updateBenefitVersion(BenefitVersionDto benefitVersionDto, Long benefitVersionId,
+                                                  IrxPrincipalDto principal) {
+    	Span span = tracer.currentSpan();
+    	BenefitVersion benefitVersion = getVersionWithCheckForLocked(benefitVersionId, principal);
+
+        processAndVerifyBenefitVersion(benefitVersionDto, benefitVersion, principal);
+
+        //TODO - refactor to apply opt in using different endpoint
+        //processMandatesApplyOptIn(benefitVersionDto, benefitVersion.getMandates());
+
+        BenefitVersion newBenefitVersion = benefitMapper.map(benefitVersionDto, BenefitVersion.class);
+        newBenefitVersion.setUserName(principal.getUsername());
+        newBenefitVersion.setBenefit(benefitVersion.getBenefit());
+        if(benefitVersionDto.getBenefitSystematicKeywords() != null) {
+            newBenefitVersion.setBenefitSystematicKeywords(benefitVersion.getBenefitSystematicKeywords());
+        }
+
+        long benefitId = benefitVersion.getBenefit().getId();
+        var updatedBenefitPosDurPackage = benefitVersionDto.getBenefitPosDurPackage();
+
+        Benefit beforeUpdateBenefit = benefitWithAttachedVersion(benefitService.findById(benefitId, principal.getUserBobData())
+                .orElseThrow(() -> new BenefitNotFoundException(benefitId)), benefitVersionId, principal);
+
+        if (benefitVersionDto.getLegacyBenefitPlanId() != null && isLegacyBenefitPlanIdLocked(benefitVersionDto.getLegacyBenefitPlanId(),
+                beforeUpdateBenefit.getClientId(), beforeUpdateBenefit.getBenefitPlanId(), principal)) {
+            throw new LegacyBenefitPlanIdLockedException(benefitVersionDto.getLegacyBenefitPlanId());
+        } else {
+            checkNetworkRestrictions(principal, newBenefitVersion);
+
+            mergeBenefitVersionComponentsForUpdate(benefitVersion, newBenefitVersion);
+
+            benefitVersion.setStartDate(newBenefitVersion.getStartDate());
+            benefitVersion.setEndDate(newBenefitVersion.getEndDate());
+            benefitVersion.setVersionCreatedDate(LocalDateTime.now());
+            benefitVersion.setNetFormularyId(newBenefitVersion.getNetFormularyId());
+            benefitVersion.setBaseFormularyId(newBenefitVersion.getBaseFormularyId());
+            benefitVersion.setBenefitDefaultData(newBenefitVersion.getBenefitDefaultData());
+            benefitVersion.setBenefitPosDurPackage(newBenefitVersion.getBenefitPosDurPackage());
+            benefitVersion.setVendor(newBenefitVersion.getVendor());
+            benefitVersion.setLegacyBenefitPlanId(newBenefitVersion.getLegacyBenefitPlanId());
+            benefitVersion.setMandates(newBenefitVersion.getMandates());
+            benefitVersion.setLegacyBenefitPlanVersionId(newBenefitVersion.getLegacyBenefitPlanVersionId());
+            benefitVersion.setNotes(newBenefitVersion.getNotes());
+            benefitVersion.setUniquePlanBenefitVersion(null);
+            benefitVersion.setBenefitSystematicKeywords(newBenefitVersion.getBenefitSystematicKeywords());
+            benefitVersion.setCopiedBenefitVersion(newBenefitVersion.getCopiedBenefitVersion());
+            Long defaultDataId = (benefitVersion.getBenefitDefaultData() != null) ? benefitVersion.getBenefitDefaultData().getId() : null;
+            Long posDurId = (benefitVersion.getBenefitPosDurPackage() != null) ? benefitVersion.getBenefitPosDurPackage().getId() : null;
+            Long dawDataId = (benefitVersion.getDawPackage() != null) ? benefitVersion.getDawPackage().getId() : null;
+            Long accumulatorStructureId = (benefitVersion.getBenefitAccumulatorStructure() != null) ? benefitVersion.getBenefitAccumulatorStructure().getId() : null;
+            Long vendorId = (benefitVersion.getVendor() != null) ? benefitVersion.getVendor().getId() : null;
+            Long cobId = (benefitVersion.getBenefitCob() != null) ? benefitVersion.getBenefitCob().getId() : null;
+
+            setIdsForBenefitVersionComponents(benefitVersion, defaultDataId, posDurId, dawDataId, accumulatorStructureId, vendorId, cobId);
+
+            List<Long> updateBenefitNetworkChannelIds = newBenefitVersion.getBenefitNetworkChannels().stream().map(BenefitNetworkChannel::getId).filter(Objects::nonNull).collect(Collectors.toList());
+            var removedNetworkChannels = benefitVersion.getBenefitNetworkChannels().stream().filter(benefitNetworkChannel -> !updateBenefitNetworkChannelIds.contains(benefitNetworkChannel.getId())).peek(benefitNetworkChannel -> benefitNetworkChannel.setBenefitVersion(null)).collect(Collectors.toList());
+
+            benefitVersion.setBenefitPrograms(newBenefitVersion.getBenefitPrograms());
+            benefitVersion.setBenefitMandates(newBenefitVersion.getBenefitMandates());
+            benefitVersion.setBenefitNetworkChannels(newBenefitVersion.getBenefitNetworkChannels());
+            benefitVersion.setBenefitAccumulatorStructure(newBenefitVersion.getBenefitAccumulatorStructure());
+            benefitVersion.setDawPackage(newBenefitVersion.getDawPackage());
+            benefitVersion.setBenefitCob(newBenefitVersion.getBenefitCob());
+            benefitVersion.setBenefitPosDurPackage(null);
+
+            //From here async is required
+            CompletableFuture<Void> saveDaw = null;
+    		try {
+    			saveDaw = CompletableFuture.runAsync(() -> saveDaw(newBenefitVersion.getDawPackage(), benefitVersion, span));
+    		} catch (Exception e) {
+    			log.error("Error while saving DAW: {}", e.getMessage());
+    		}
+    		CompletableFuture<Void> saveNetwork = null;
+    		try {
+    			saveNetwork = CompletableFuture.runAsync(() ->saveNetwork(newBenefitVersion.getBenefitNetworkChannels(), benefitVersion, benefitVersionDto.getNetFormulary(),false, principal, span));
+    		} catch (Exception e) {
+    			log.error("Error while saving Network: {}", e.getMessage());
+    		}
+    		CompletableFuture<Void> saveAccum = null;
+    		try {
+    			saveAccum = CompletableFuture.runAsync(() ->saveAccum(newBenefitVersion.getBenefitAccumulatorStructure(), benefitVersion, span));
+    		} catch (Exception e) {
+    			log.error("Error while saving Accum: {}", e.getMessage());
+    		}
+    		CompletableFuture<Void> saveCob = null;
+    		try {
+    			saveCob = CompletableFuture.runAsync(() ->saveCob(newBenefitVersion.getBenefitCob(), benefitVersion, span));
+    		} catch (Exception e) {
+    			log.error("Error while saving Cob: {}", e.getMessage());
+    		}
+    		
+    		CompletableFuture<Void> updateBenefitPrograms = null;
+    		try {
+    			updateBenefitPrograms = CompletableFuture
+    					.runAsync(() ->updateBenefitPrograms(benefitVersion.getBenefitPrograms(), span));
+    		} catch (Exception e) {
+    			log.error("Error while saving Programs: {}", e.getMessage());
+    		}
+    		
+    		CompletableFuture<Void> updateBenefitMandates = null;
+    		try {
+    			updateBenefitMandates = CompletableFuture
+    					.runAsync(() ->updateBenefitMandates(benefitVersion.getBenefitMandates(), span));
+    		} catch (Exception e) {
+    			log.error("Error while saving Mandates: {}", e.getMessage());
+    		}
+    		
+    		CompletableFuture<Void> updatePosDur = null;
+    		try {
+    			updatePosDur = CompletableFuture
+    					.runAsync(() ->persistUpdatedPosDurDataMappedWithBenefit(updatedBenefitPosDurPackage,benefitVersion, span));
+    		} catch (Exception e) {
+    			log.error("Error while saving POSDUR: {}", e.getMessage());
+    		}
+			CompletableFuture<Void> combinedFuture = CompletableFuture.allOf(
+					updateBenefitPrograms, updateBenefitMandates,saveDaw,saveNetwork,saveAccum,saveCob,updatePosDur);
+			try {
+				// Below line will stop the execution to complete all future
+				combinedFuture.get();
+				log.info("Completed Async process");
+			} catch (Exception e) {
+				e.printStackTrace();
+			}
+
+            var savedTemporaryVersion = benefitVersionRepository.save(benefitVersion);
+            benefitVersionRepository.updateUniquePlanBenefitVersion(savedTemporaryVersion.getId().intValue(),Long.toHexString(savedTemporaryVersion.getId()).toUpperCase());
+
+            //programs and mandates not deleted as part of edit flow anymore
+            benefitNetworkChannelService.delete(removedNetworkChannels);
+
+            BenefitVersion savedBenefitVersion = benefitVersionRepository.findById(savedTemporaryVersion.getId(), principal.getUserBobData())
+                    .orElseThrow(() -> new BenefitVersionNotFoundException(savedTemporaryVersion.getId()));
+    		
+    		CompletableFuture.runAsync(() ->saveAuditBenefit(beforeUpdateBenefit,benefitId,principal,savedBenefitVersion.getId()));
+            
+            saveBenefitStatusForNewVersion(savedBenefitVersion, benefitVersionId, BenefitStatusType.IN_PROGRESS, principal);
+            return processor.postProcess(savedBenefitVersion, principal);
+
+        }
+    }
+
+ /**
+     * {@summary Method to return current benefit/benefitversion/lightbenefitversion for given benefit /benefit version id.}
+     * @param benefitId
+     * @param versionId
+     * @param principal
+     * @author AH83934
+     */
+    public BenefitDto getBenefitDetailsById(Long benefitId, Long versionId, IrxPrincipalDto principal) {
+    	Benefit viewBenefit = null;
+
+    	BenefitDto viewBenefitDTO = null;
+    	CompletableFuture<Map<Long,String>> countBenefitFuture=null;
+
+        try{
+            viewBenefit = benefitRepository.getBenefitForViewPage(benefitId,versionId).orElse(null);
+            String benefitPlanId=viewBenefit.getBenefitPlanId();
+            if(viewBenefit != null){
+            	// fetching latest version id for each version info
+            	countBenefitFuture  =  CompletableFuture.supplyAsync(() ->getLatestBenefitVersionStatus(benefitId,versionId,benefitPlanId,principal));
+
+                /*Preparing benefit systematic keyword object list*/
+                viewBenefit.getBenefitVersion().setBenefitSystematicKeywords(benefitSystematicKeywordRepository.findByBenefitVersionId(versionId));
+
+                /*Preparing benefit default data object list*/
+                viewBenefit.getBenefitVersion().setBenefitDefaultData(benefitDefaultDataRepository.findByBenefitVersionId(viewBenefit.getBenefitVersion().getId()).orElse(null));
+
+                /*Preparing benefit dynamic layer object list*/
+                getBenefitDynamicLayerForBenefitViewPage(viewBenefit);
+
+                /*Preparing light benefit version object list*/
+                viewBenefit.setLightBenefitVersions(Set.of(BenefitServiceHelper.getLightBenefitVersionObject(viewBenefit.getBenefitVersion(), viewBenefit)));
+
+                viewBenefit.getBenefitVersion().setBenefit(viewBenefit);
+
+                viewBenefitDTO = processor.postProcess(viewBenefit, principal);
+
+                if(viewBenefitDTO.getBenefitVersion().getVersionBasedOn() != null ) {
+                	viewBenefitDTO.getBenefitVersion().setRetroVersion(viewBenefitDTO.getBenefitVersion().getVersionBasedOn());
+                } else {
+                	/*To fetch retro version details.*/
+                    if((viewBenefitDTO.getBenefitVersion().getRetro() != null && viewBenefitDTO.getBenefitVersion().getRetro()) && viewBenefitDTO.getBenefitVersion().getRetroVersionId() != null){
+                        viewBenefitDTO.getBenefitVersion().setRetroVersion(benefitVersionService.getRetroVersionDetails(viewBenefitDTO.getBenefitVersion().getRetroVersionId()));
+                    }else{
+                    	/*Setting retro version for first version as New Build otherwise as per base previous version */
+                    	if (viewBenefit.getBenefitVersion().getMajorVersion() == 0 && viewBenefit.getBenefitVersion().getMinorVersion() == 1) {
+    						viewBenefitDTO.getBenefitVersion().setRetroVersion(NEW_BUILD);
+                    	}else{
+                    		viewBenefitDTO.getBenefitVersion().setRetroVersion(benefitVersionService.getRetroVersion(benefitId,versionId));
+                    	}
+                    }
+                }
+
+                if (viewBenefitDTO != null && !CollectionUtils.isEmpty(viewBenefitDTO.getLightBenefitVersions())) {
+                    /*Updating the benefit status/lastupdated for response benefitdto*/
+                    updateLightBenefitVersionDto(viewBenefitDTO.getLightBenefitVersions().first(),principal);
+                }
+            }
+            log.info("Completed preparing BenefitDTO object for view page for benefit id:: {} and benefitversion id:: {} ", benefitId, versionId);
+        }catch (Exception e){
+            log.error("Exception in preparing BenefitDTO object for view page for benefit id:: {} and benefitversion id:: {} and cause:: {}", benefitId, versionId, e.getMessage());
+        }
+    	try {
+			CompletableFuture<Void> combinedFuture = CompletableFuture.allOf(countBenefitFuture);
+			combinedFuture.get();
+			if(countBenefitFuture != null && viewBenefitDTO!=null){
+				log.info("Completed Async process");
+				Map<Long,String> latestVersionData=countBenefitFuture.get();
+				viewBenefitDTO.setLatestVersionId((Long)latestVersionData.keySet().toArray()[0]);
+				if(latestVersionData.get(viewBenefitDTO.getLatestVersionId()) !=null)
+					viewBenefitDTO.setLatestVersionStatus(latestVersionData.get(viewBenefitDTO.getLatestVersionId()));
+                viewBenefitDTO.setLatestVersionLockedStatus(getLatestBenefitVersionLockedStatus(viewBenefitDTO.getLatestVersionId()));
+            }
+		} catch (CancellationException | CompletionException e) {
+			log.error(
+					"CancellationException| CompletionException in collecting completable future objects results for Latest version id :: {} {} ", benefitId,e.getMessage());
+		} catch (Exception e) {
+			log.error("Exception in collecting completable future objects results for Latest version id :: {} {} ",benefitId , e.getMessage());
+		}
+        return viewBenefitDTO;
+    }
+
+
+@Async("bulkProcessExecutor")
+	//@Transactional
+	public void bulkUpdateAsynProcess(BulkUpdateProcessInputDto bulkUpdateProcessInputDto) {
+		Span span = tracer.currentSpan();
+		
+		logger.info("[projectId:{}], Started the BulkUpdate Async Process", bulkUpdateProcessInputDto.getProjectId());
+		
+		Optional<BenefitBulkUpdateProject>  bulkUpdateProject = Optional.empty();
+		
+		List<Long> failedBenefitVersions = new ArrayList<>();
+
+		BenefitBulkUpdateProject benefitBulkUpdateProject = null;
+		List<BenefitBulkUpdateProjectDetails> benefitBulkUpdateProjectDetailsList = null;
+		try {
+			bulkUpdateProject = benefitBulkUpdateRepository.singleFetch(bulkUpdateProcessInputDto.getProjectId());
+
+			if (bulkUpdateProject.isPresent()) {
+				benefitBulkUpdateProject = bulkUpdateProject.get();
+				// update processed_by,process_start_date and status is processing.
+				benefitBulkUpdateRepository.updateProcessByAndDate(bulkUpdateProcessInputDto.getProjectId(),bulkUpdateProcessInputDto.getIrxPrincipalDto().getUsername(), LocalDateTime.now(),
+						bulkUpdateProcessInputDto.getIrxPrincipalDto());
+				benefitBulkUpdateProjectDetailsList = benefitBulkUpdateProject.getBenefitBulkUpdateProjectDetails();
+
+				InputLibraryData inputLibraryData = bulkProcessAsyncUtil.getInputLibraryDataFromLibraryAPI(benefitBulkUpdateProject,bulkUpdateProcessInputDto);
+				// revisit to lower number & nullify after process
+				if (benefitBulkUpdateProjectDetailsList.size() >= 2) {
+					
+					long startTime = System.currentTimeMillis();
+					log.info("[projectId:{}], Start time {} milli seconds", bulkUpdateProcessInputDto.getProjectId(), startTime);
+					
+					List<List<BenefitBulkUpdateProjectDetails>> benefitBulkUpdateDetails = partitionContracts(
+							benefitBulkUpdateProjectDetailsList, bulkSubmitSchedulerPartitionSize);
+					List<CompletableFuture<?>> completableFutures = new ArrayList<>();
+					try {
+						log.info("Create:: Asynch process bulk details list size {} ", benefitBulkUpdateDetails.size());
+						BenefitBulkUpdateProject bulkUpdateData=benefitBulkUpdateProject;
+						for (int i = 0; i < benefitBulkUpdateDetails.size(); i++) {
+							int j = i;
+							log.info("Thread is started for process bulk details creation: {}", j);
+							completableFutures.add(CompletableFuture
+									.runAsync(() -> bulkupdateAndBulkSubmitByMultiThreads(bulkUpdateProcessInputDto,
+											bulkUpdateProcessInputDto.getIrxPrincipalDto(),
+											bulkUpdateData,benefitBulkUpdateDetails.get(j),
+											failedBenefitVersions,inputLibraryData)));
+						}
+						log.info("Create:: Waiting for threads to be complete");
+						CompletableFuture.allOf(completableFutures.toArray(new CompletableFuture<?>[0])).join();
+						log.info("Create:: End of asynch for bulk details list size {} ", benefitBulkUpdateDetails.size());
+
+					} catch (Exception e) {
+						log.error("Exception occurred during bulk-submit {}", e);
+					}finally {
+						/*De-reference the objects to free up memory*/
+						completableFutures.clear();
+					}
+					long endTime = System.currentTimeMillis();
+
+					log.info("[projectId:{}], End time {} milliSeconds",bulkUpdateProcessInputDto.getProjectId(), endTime);
+					log.info("[projectId:{}], took {} milliSeconds", bulkUpdateProcessInputDto.getProjectId(), endTime - startTime);
+
+				} else {
+					
+					bulkUpdateSplitAndAsync(bulkUpdateProcessInputDto, benefitBulkUpdateProject.getProjectId(), benefitBulkUpdateProjectDetailsList, failedBenefitVersions,inputLibraryData, span);
+					log.info("[projectId:{}], Completed one bulkUpdateSplitAndAsync process", bulkUpdateProcessInputDto.getProjectId());
+					
+				}
+			}
+			failedBenefitVersionRollback(bulkUpdateProcessInputDto, failedBenefitVersions);
+			failedBenefitVersions.clear();
+			
+			log.info("[projectId:{}], Update the project status as BULKUPDATED", bulkUpdateProcessInputDto.getProjectId());
+			//update the status is bulkupdated and process_end date.
+			benefitBulkUpdateRepository.updateStatusAndEndDate(bulkUpdateProcessInputDto.getProjectId(),LocalDateTime.now(),
+					 bulkUpdateProcessInputDto.getBulkUpdateFor(),bulkUpdateProcessInputDto.getAccumBucketType() , BulkUpdateStatus.BULKUPDATED);
+			
+			integrationUtils.publishNotificationToSnsForEmail(bulkUpdateProcessInputDto.getProjectId(),
+					String.format(BulkEngineUpdateUtils.BULK_UPDATE_EMAIL_SUB, bulkUpdateProcessInputDto.getProject()), 
+					String.format(BulkEngineUpdateUtils.BULK_UPDATE_EMAIL_BODY, bulkUpdateProcessInputDto.getProject(), bulkUpdateProcessInputDto.getProjectDescription(), BulkUpdateStatus.BULKUPDATED.getStatus()), 
+					bulkUpdateProcessInputDto.getIrxPrincipalDto().getToken());
+			
+			 
+			}
+			catch(Exception e) {
+				log.error("[projectId:{}], Exception occured during bulk update {}", bulkUpdateProcessInputDto.getProjectId(), e);
+				failedBenefitVersionRollback(bulkUpdateProcessInputDto, failedBenefitVersions);
+				failedBenefitVersions.clear();
+				List<BenefitBulkUpdateProjectDetails> detailsList = bulkUpdateProject.isPresent()?bulkUpdateProject.get().getBenefitBulkUpdateProjectDetails():Collections.emptyList();
+				bulkUpdateUtil.unlockBenefitsAndPublishNotificationToSns(bulkUpdateProcessInputDto, detailsList);
+				/*De-reference the objects to free up memory*/
+				detailsList.clear();
+			}finally {
+			/*De-reference the objects to free up memory*/
+				failedBenefitVersions.clear();
+				bulkUpdateProject = null;
+				benefitBulkUpdateProject = null;
+				if(!CollectionUtils.isEmpty(benefitBulkUpdateProjectDetailsList))
+				 	benefitBulkUpdateProjectDetailsList.clear();
+			}
+			 
+			log.info("[projectId:{}], Completed the BulkUpdate Async Process", bulkUpdateProcessInputDto.getProjectId());
+	}
+
+
+
+
+@Override
+	public void processBulkContractCode(ContractCodeRequestType contractCodeRequestType,
+			List<ContractAssociationDto> contractAssociationDto, String fileName, IrxPrincipalDto irxPrincipal) {
+		
+		List<List<ContractAssociationDto>> contractSubList = partitionContracts(contractAssociationDto, contractListPartitionSize);
+		List<List<ContractCVSOutputDto>> rejectContractsNew = new ArrayList<>();
+        List<CompletableFuture<?>> completableFutures = new ArrayList<>();
+
+		try {
+			if (contractCodeRequestType.equals(ContractCodeRequestType.CREATE)) {
+				log.info("Create:: Asynch process contracts list size {} ",contractSubList.size());
+				for (int i = 0; i < contractSubList.size(); i++) {
+					int j = i;
+					log.info("Thread is started for process bulk contract creation: {}", j);
+					completableFutures.add(CompletableFuture.supplyAsync(() -> processCreate(contractSubList.get(j), irxPrincipal,j))
+									.thenAccept(rejectContractsNew::add));
+				}
+				log.info("Create:: Waiting for threads to be complete");
+		        CompletableFuture.allOf(completableFutures.toArray(new CompletableFuture<?>[0])).join();
+				log.info("Create:: End of asynch for contracts list size {} ",contractSubList.size());
+			} else {
+				log.info("Update:: Asynch process contracts list size {} ",contractSubList.size());
+				for (int i = 0; i < contractSubList.size(); i++) {
+					int j = i;
+					log.info("Thread is started for process bulk contract update: {}", j);
+					completableFutures.add(CompletableFuture.supplyAsync(() -> processUpdate(contractSubList.get(j), irxPrincipal,j))
+										.thenAccept(rejectContractsNew::add));
+				}
+				log.info("Update:: Waiting for threads to be complete");
+		        CompletableFuture.allOf(completableFutures.toArray(new CompletableFuture<?>[0])).join();
+				log.info("Update:: End of asynch for contracts list size {} ",contractSubList.size());
+			}
+		} catch (Exception e) {
+			log.error("Exception in processing of bulk contract codes:: "+e.getMessage());
+		}
+
+		try {
+			List<ContractCVSOutputDto> rejectedList=rejectContractsNew.stream().flatMap(List::stream).collect(Collectors.toList());
+			log.info("Final RejectedList Contracts size {} ", !rejectedList.isEmpty() ? rejectedList.size() : 0);
+			if(!rejectedList.isEmpty())
+				exportRejectedContractsData(rejectedList,contractCodeRequestType);
+		} catch (Exception e) {
+			log.error("error {}", e.getMessage());
+		}
+		// trigger email notification
+		bulkContractEmailNotification(contractCodeRequestType,fileName);
+		completableFutures=null;
+	}
+ protected BenefitVersionDto createBenefitVersion(BenefitVersionDto benefitVersionDto, Long benefitVersionId, boolean postProcess,
+                                                     boolean updateBenefitStatusWithNewVersionId, boolean bulkProcessFlow, boolean accumBulkUpdate, IrxPrincipalDto principal) {
+    	Span span = tracer.currentSpan();
+    	
+    	log.info("Getting version for checking {}", benefitVersionId);
+        BenefitVersion benefitVersion = getVersionWithCheckForLocked(benefitVersionId, principal);
+        log.info("Got the old version for checking {}", benefitVersionId);
+
+        log.info("Started verifying the benefit version {}", benefitVersionId);
+        processAndVerifyBenefitVersion(benefitVersionDto, benefitVersion, principal);
+        log.info("Completed verifying the benefit version {}", benefitVersionId);
+
+        BenefitVersion newBenefitVersion = mapFromDtoToNewBenefitVersion(benefitVersionDto, benefitVersion, principal);
+
+        log.info("Started checkNetworkRestrictions/mergeBenefitVersionComponentsForCreate/setBenefitDefaultDataForeignClaimsAndPaperClaims the benefit version {}", benefitVersionId);
+        checkNetworkRestrictions(principal, newBenefitVersion);
+        mergeBenefitVersionComponentsForCreate(benefitVersion, newBenefitVersion);
+        setBenefitDefaultDataForeignClaimsAndPaperClaims(newBenefitVersion, principal);
+        log.info("Completed checkNetworkRestrictions/mergeBenefitVersionComponentsForCreate/setBenefitDefaultDataForeignClaimsAndPaperClaims the benefit version {}", benefitVersionId);
+
+        long benefitId = benefitVersion.getBenefit().getId();
+        log.info("Started finding the Benefit by ID {}", benefitId);
+        Benefit beforeUpdateBenefit = benefitWithAttachedVersion(benefitService.findById(benefitId, principal.getUserBobData())
+                .orElseThrow(() -> new BenefitNotFoundException(benefitId)), benefitVersionId, principal);
+        log.info("Completed finding the Benefit by ID {}", benefitId);
+        if (benefitVersionDto.getLegacyBenefitPlanId() != null && isLegacyBenefitPlanIdLocked(benefitVersionDto.getLegacyBenefitPlanId(),
+                beforeUpdateBenefit.getClientId(), beforeUpdateBenefit.getBenefitPlanId(), principal)) {
+            throw new LegacyBenefitPlanIdLockedException(benefitVersionDto.getLegacyBenefitPlanId());
+        } else {
+            newBenefitVersion.setLegacyBenefitPlanId(benefitVersionDto.getLegacyBenefitPlanId());
+        }
+        
+        var systematicKeywords = newBenefitVersion.getBenefitSystematicKeywords();
+        var resultNetworkChannels = newBenefitVersion.getBenefitNetworkChannels();
+        var benefitAccumulatorStructure = newBenefitVersion.getBenefitAccumulatorStructure();
+        var benefitDawPackage = newBenefitVersion.getDawPackage();
+        var benefitPrograms = newBenefitVersion.getBenefitPrograms();
+        var benefitMandates = newBenefitVersion.getBenefitMandates();
+        var benefitCob = newBenefitVersion.getBenefitCob();
+        //var benefitVendor = newBenefitVersion.getVendor();
+        var updatedBenefitPosDurPackage = benefitVersionDto.getBenefitPosDurPackage();
+
+        setRetroForBenefitVersion(benefitVersionDto, principal, benefitVersion, newBenefitVersion);
+
+        newBenefitVersion.setVersionCreatedDate(LocalDateTime.now());
+        newBenefitVersion.setProductionDate(null);
+
+        setBenefitConnectionIdsOnNull(resultNetworkChannels, benefitAccumulatorStructure, benefitDawPackage, benefitCob, newBenefitVersion);
+
+        if (bulkProcessFlow && accumBulkUpdate) {
+            newBenefitVersion.setBenefitAccumulatorStructure(benefitMapper.map(benefitVersionDto.getBenefitAccumulatorStructure(), BenefitAccumulatorStructure.class));
+        } else {
+            newBenefitVersion.setBenefitAccumulatorStructure(null);
+        }
+        newBenefitVersion.setBenefitSystematicKeywords(null);
+        newBenefitVersion.setDawPackage(null);
+        newBenefitVersion.setBenefitNetworkChannels(new LinkedList<>());
+        newBenefitVersion.setBenefitPrograms(new LinkedList<>());
+        newBenefitVersion.setBenefitMandates(new LinkedList<>());
+        newBenefitVersion.setBenefitCob(null);
+        newBenefitVersion.setId(null);
+        newBenefitVersion.setVersionCreatedDate(LocalDateTime.now());
+        newBenefitVersion.setProductionDate(null);
+        newBenefitVersion.setUniquePlanBenefitVersion(null);
+        newBenefitVersion.setBenefitPosDurPackage(null);
+        newBenefitVersion.setCopiedBenefitVersion(benefitVersionDto.getCopiedBenefitVersion());
+        log.info("Started saving new Benefit version {}", null!=newBenefitVersion.getId()?newBenefitVersion.getId():benefitId);
+        var savedTemporaryVersion = benefitVersionRepository.save(newBenefitVersion);
+        if(bulkProcessFlow)
+        	updateGeneralDefaultsDataForBulk(savedTemporaryVersion.getBenefitDefaultData(),savedTemporaryVersion.getId(), benefitVersionId,principal);
+        log.info("Completed saving new Benefit version {}", null!=newBenefitVersion.getId()?newBenefitVersion.getId():benefitId);
+        benefitVersionRepository.updateUniquePlanBenefitVersion(savedTemporaryVersion.getId().intValue(),Long.toHexString(savedTemporaryVersion.getId()).toUpperCase());
+
+        //Need async process from here
+        CompletableFuture<Void> saveSystematicKeywords = null;
+        try {
+        	saveSystematicKeywords = CompletableFuture.runAsync(() -> persistSystematicKeywords(systematicKeywords, savedTemporaryVersion, span));  
+        	} catch (Exception e) {
+        		log.error("Error while saving Systematic keywords: {}", e.getMessage());
+        	}
+		CompletableFuture<Void> saveDaw = null;
+		try {
+			saveDaw = CompletableFuture.runAsync(() -> updateDawPackage(benefitDawPackage, savedTemporaryVersion, span));
+		} catch (Exception e) {
+			log.error("Error while saving DAW: {}", e.getMessage());
+		}
+		CompletableFuture<Void> saveNetwork = null;
+		try {
+			saveNetwork = CompletableFuture.runAsync(() ->saveNetwork(resultNetworkChannels, savedTemporaryVersion, benefitVersionDto.getNetFormulary(),false, principal, span));
+		} catch (Exception e) {
+			log.error("Error while saving Network: {}", e.getMessage());
+		}
+		CompletableFuture<Void> saveAccum = null;
+		try {
+			saveAccum = CompletableFuture.runAsync(() ->saveAccum(benefitAccumulatorStructure, savedTemporaryVersion, span));
+		} catch (Exception e) {
+			log.error("Error while saving Accum: {}", e.getMessage());
+		}
+		CompletableFuture<Void> saveCob = null;
+		try {
+			saveCob = CompletableFuture.runAsync(() ->saveCob(benefitCob, savedTemporaryVersion, span));
+		} catch (Exception e) {
+			log.error("Error while saving Cob: {}", e.getMessage());
+		}
+
+		CompletableFuture<Void> saveNewBenefitPrograms = null;
+		try {
+			saveNewBenefitPrograms = CompletableFuture
+					.runAsync(() -> saveNewBenefitPrograms(benefitPrograms, savedTemporaryVersion, bulkProcessFlow, principal, span));
+		} catch (Exception e) {
+			log.error("Error while saving Programs: {}", e.getMessage());
+		}
+		
+		CompletableFuture<Void> saveNewBenefitMandates = null;
+		try {
+			saveNewBenefitMandates = CompletableFuture
+					.runAsync(() -> saveNewBenefitMandates(benefitMandates, savedTemporaryVersion, bulkProcessFlow, principal, span));
+		} catch (Exception e) {
+			log.error("Error while saving Mandates: {}", e.getMessage());
+		}
+		
+		CompletableFuture<Void> persistUpdatedPosDurDataMappedWithBenefit = null;
+		try {
+			persistUpdatedPosDurDataMappedWithBenefit = CompletableFuture
+					.runAsync(() -> persistUpdatedPosDurDataMappedWithBenefit(updatedBenefitPosDurPackage,
+							savedTemporaryVersion,span));
+		} catch (Exception e) {
+			log.error("Error while saving POSDUR: {}", e.getMessage());
+		}
+		
+		CompletableFuture<Void> saveNewBenefitSplzdReqs = null;
+		
+		try {
+			saveNewBenefitSplzdReqs = CompletableFuture.runAsync(()->copyBenefitSpecializedReqsToNewVersion(benefitVersionDto.getId(), savedTemporaryVersion.getId(), span));
+		} catch (Exception e) {
+			log.error("Error while saving specialized reqs: {}", e.getMessage());
+		}
+		
+		CompletableFuture<Void> combinedFuture = CompletableFuture.allOf(saveSystematicKeywords,saveDaw, saveNetwork, saveAccum, saveCob,
+				saveNewBenefitPrograms, saveNewBenefitMandates, persistUpdatedPosDurDataMappedWithBenefit, saveNewBenefitSplzdReqs);
+		try {
+			combinedFuture.get();
+			log.info("Completed Async process");
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
+        
+        BenefitVersion savedBenefitVersion = benefitVersionRepository.findById(savedTemporaryVersion.getId(), principal.getUserBobData())
+                .orElseThrow(() -> new BenefitVersionNotFoundException(savedTemporaryVersion.getId()));
+
+        if (updateBenefitStatusWithNewVersionId) {
+            saveBenefitStatusForNewVersion(newBenefitVersion, benefitVersionId, BenefitStatusType.IN_PROGRESS, principal);
+        }
+        log.info("Started post processing of new benefit version {}", savedBenefitVersion.getId());
+        if (postProcess) {
+            return processor.postProcess(savedBenefitVersion, principal);
+        }
+        log.info("Completed post processing of new benefit version {}", savedBenefitVersion.getId());
+        BenefitVersionDto mappedBenefitVersion = benefitMapper.map(savedBenefitVersion, BenefitVersionDto.class);
+//        TO-DO: Why below condition is required?
+        if((savedBenefitVersion != null && savedBenefitVersion.getBenefitPosDurPackage() != null)
+                && (benefitVersionDto != null && benefitVersionDto.getBenefitPosDurPackage() != null)){
+            mappedBenefitVersion.getBenefitPosDurPackage().setDynamicLayers(processPosDurDynamicLayersIDsForBenefitVersion(savedBenefitVersion.getBenefitPosDurPackage().getBenefitPosDurDynamicLayers(),principal));
+        }
+        return benefitMapper.map(savedBenefitVersion, BenefitVersionDto.class);
+    }
