@@ -1,0 +1,48 @@
+package com.ingeniorx.butterscotch.lib.benefit.dto.exceptions;
+
+import com.ingeniorx.butterscotch.lib.benefit.dto.BenefitErrorDTO;
+
+import static java.lang.String.format;
+
+public class BenefitNotFoundException extends BenefitException {
+
+    public BenefitNotFoundException(BenefitErrorDTO benefitErrorDTO){
+        super(benefitErrorDTO);
+    }
+
+    public BenefitNotFoundException(Long benefitId) {
+        super(BenefitErrorDTO.builder()
+                        .errorCode(BenefitErrorCode.BENEFIT_NOT_FOUND_BY_ID.getCode())
+                        .entityId(benefitId)
+                        .build(),
+                format("Benefit with id %d not found.", benefitId)
+        );
+    }
+
+    public BenefitNotFoundException(String planId) {
+        super(BenefitErrorDTO.builder()
+                        .errorCode(BenefitErrorCode.BENEFIT_NOT_FOUND_BY_PLAN_ID.getCode())
+                        .businessId(planId)
+                        .build(),
+                format("Benefit with planId %s not found.", planId)
+        );
+    }
+
+    public BenefitNotFoundException(String benefitCode, BenefitErrorCode errorCode) {
+        super(BenefitErrorDTO.builder()
+                        .errorCode(errorCode.getCode())
+                        .businessId(benefitCode)
+                        .build(),
+                format("Benefit with code %s not found.", benefitCode)
+        );
+    }
+
+    public BenefitNotFoundException(Long benefitId, Long benefitVersionId) {
+        super(BenefitErrorDTO.builder()
+                        .errorCode(BenefitErrorCode.BENEFIT_NOT_FOUND_BY_ID.getCode())
+                        .entityId(benefitId)
+                        .build(),
+                format("Benefit with id %s and benefitVersionId %s not found.", benefitId, benefitVersionId)
+        );
+    }
+}
