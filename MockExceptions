@@ -1,0 +1,186 @@
+package com.ingeniorx.butterscotch.lib.benefit.web.controller.exception;
+
+import com.ingeniorx.butterscotch.filestatus.dto.exception.exceptions.FileStatusNotFoundException;
+import com.ingeniorx.butterscotch.lib.benefit.dto.exceptions.*;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.ControllerAdvice;
+import org.springframework.web.bind.annotation.ExceptionHandler;
+
+import com.ingeniorx.butterscotch.lib.accums.dto.exception.exceptions.AccumulatorForbiddenException;
+import com.ingeniorx.butterscotch.lib.accums.dto.exception.exceptions.AccumulatorUnauthorizedException;
+import com.ingeniorx.butterscotch.lib.benefit.dto.BenefitErrorDTO;
+import com.ingeniorx.butterscotch.lib.benefit.dto.exceptions.enrichers.out.accums.BenefitDtoAccumBucketFieldNotFoundException;
+import com.ingeniorx.butterscotch.lib.benefit.dto.exceptions.enrichers.out.accums.BenefitDtoAccumBucketTypeNotFoundException;
+import com.ingeniorx.butterscotch.lib.benefit.dto.exceptions.enrichers.out.accums.BenefitDtoAccumTypeNotFoundException;
+import com.ingeniorx.butterscotch.lib.benefit.dto.exceptions.enrichers.out.client.BenefitDtoClientNotFoundException;
+import com.ingeniorx.butterscotch.lib.benefit.dto.exceptions.enrichers.out.client.BenefitDtoDynamicLayerNotFoundException;
+import com.ingeniorx.butterscotch.lib.benefit.dto.exceptions.enrichers.out.client.BenefitDtoLobNotFoundException;
+import com.ingeniorx.butterscotch.lib.benefit.dto.exceptions.enrichers.out.client.BenefitDtoStateNotFoundException;
+import com.ingeniorx.butterscotch.lib.benefit.dto.exceptions.enrichers.out.formulary.BenefitDtoBaseFormularyNotFoundException;
+import com.ingeniorx.butterscotch.lib.benefit.dto.exceptions.enrichers.out.formulary.BenefitDtoNetFormularyNotFoundException;
+import com.ingeniorx.butterscotch.lib.benefit.dto.exceptions.enrichers.out.network.BenefitDtoNetworkChannelNotFoundException;
+import com.ingeniorx.butterscotch.lib.benefit.dto.exceptions.enrichers.out.posdur.BenefitDtoPosDurPackageListNotFoundException;
+import com.ingeniorx.butterscotch.lib.bob.defaults.dto.exception.exceptions.BobForbiddenException;
+import com.ingeniorx.butterscotch.lib.bob.defaults.dto.exception.exceptions.BobUnauthorizedException;
+import com.ingeniorx.butterscotch.lib.client.dto.exception.exceptions.ClientException;
+import com.ingeniorx.butterscotch.lib.client.dto.exception.exceptions.ClientForbiddenException;
+import com.ingeniorx.butterscotch.lib.client.dto.exception.exceptions.ClientNotFoundException;
+import com.ingeniorx.butterscotch.lib.client.dto.exception.exceptions.ClientUnauthorizedException;
+import com.ingeniorx.butterscotch.lib.client.dto.exception.exceptions.DynamicLayerNotFoundException;
+import com.ingeniorx.butterscotch.lib.client.dto.exception.exceptions.LobNotFoundException;
+import com.ingeniorx.butterscotch.lib.client.dto.exception.exceptions.StateNotFoundException;
+import com.ingeniorx.butterscotch.lib.formulary.dto.exception.ErrorCode;
+import com.ingeniorx.butterscotch.lib.formulary.dto.exception.ErrorDTO;
+import com.ingeniorx.butterscotch.lib.formulary.dto.exception.FormularyForbiddenException;
+import com.ingeniorx.butterscotch.lib.formulary.dto.exception.FormularyUnauthorizedException;
+import com.ingeniorx.butterscotch.lib.network.dto.exception.exceptions.NetworkForbiddenException;
+import com.ingeniorx.butterscotch.lib.network.dto.exception.exceptions.NetworkUnauthorizedException;
+
+import lombok.extern.slf4j.Slf4j;
+
+@Slf4j
+@ControllerAdvice
+public class BenefitGlobalExceptionHandler {
+
+    @ExceptionHandler({
+            BenefitDtoClientNotFoundException.class,
+            BenefitDtoLobNotFoundException.class,
+            BenefitDtoStateNotFoundException.class,
+            BenefitDtoDynamicLayerNotFoundException.class,
+            BenefitDtoNetFormularyNotFoundException.class,
+            BenefitDtoNetworkChannelNotFoundException.class,
+            BenefitDtoAccumTypeNotFoundException.class,
+            BenefitDtoAccumBucketTypeNotFoundException.class,
+            BenefitDtoAccumBucketFieldNotFoundException.class,
+            BenefitDtoBaseFormularyNotFoundException.class,
+            BenefitDtoPosDurPackageListNotFoundException.class
+    })
+    public ResponseEntity<BenefitErrorDTO> handleDtoExpandException(final BenefitException e) {
+        log.error("Error while expanding DTO", e);
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                .body(buildResponse(e));
+    }
+
+    @ExceptionHandler({
+            BenefitInternalException.class,
+            BenefitNoVersionsFoundException.class,
+            BenefitVersionDeletionException.class
+    })
+    public ResponseEntity<BenefitErrorDTO> handleInternalException(final BenefitException e) {
+        log.error("Benefit internal exception", e);
+        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                .body(buildResponse(e));
+    }
+
+    @ExceptionHandler({
+            ClientNotFoundException.class,
+            LobNotFoundException.class,
+            StateNotFoundException.class,
+            DynamicLayerNotFoundException.class
+    })
+    public ResponseEntity<ErrorDTO> handleException(final ClientException e) {
+        log.error("Entity not found exception in benefit microservice", e);
+        return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                .body(ErrorDTO.builder()
+                        .errorCode(e.getErrorCode().getCode())
+                        .message(e.getMessage())
+                        .entityId(e.getEntityId())
+                        .businessId(e.getEntityCode())
+                        .build());
+    }
+
+    @ExceptionHandler(value = {
+            ClientUnauthorizedException.class,
+            FormularyUnauthorizedException.class,
+            NetworkUnauthorizedException.class,
+            AccumulatorUnauthorizedException.class,
+            BobUnauthorizedException.class,
+            BenefitUnauthorizedException.class,
+            BenefitVersionUserUnauthorizedException.class
+    })
+    public ResponseEntity<BenefitErrorDTO> handleUnauthorized(Exception e) {
+        log.error("Unauthorized exception in benefit microservice", e);
+        return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                .body(BenefitErrorDTO.builder()
+                        .errorCode(ErrorCode.UNAUTHORIZED.getCode())
+                        .message(e.getMessage())
+                        .build());
+    }
+
+    @ExceptionHandler(value = {
+            ClientForbiddenException.class,
+            FormularyForbiddenException.class,
+            NetworkForbiddenException.class,
+            AccumulatorForbiddenException.class,
+            BobForbiddenException.class,
+            BenefitForbiddenException.class
+    })
+    public ResponseEntity<BenefitErrorDTO> handleForbidden(Exception e) {
+        log.error("Forbidden exception in benefit microservice", e);
+        return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                .body(BenefitErrorDTO.builder()
+                        .errorCode(ErrorCode.FORBIDDEN.getCode())
+                        .message(e.getMessage())
+                        .build());
+    }
+
+    @ExceptionHandler({
+            BenefitNotFoundException.class,
+            BenefitVersionNotFoundException.class,
+            BenefitCostShareNotFoundException.class,
+            BenefitNetworkChannelNotFound.class,
+            BenefitProgramNotFoundException.class,
+            BenefitMandateNotFoundException.class,
+            BenefitVersionFileStatusNotFoundException.class
+    })
+    public ResponseEntity<BenefitErrorDTO> notFoundException(final BenefitException e) {
+        log.error("Entity not found", e);
+        return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                .body(buildResponse(e));
+    }
+
+    @ExceptionHandler({
+            BenefitCostShareValidationException.class,
+            BenefitNetworkChannelRefillTooSoonValidationException.class,
+            BenefitNetworkChannelMaxDaysSupplyValidationException.class,
+            BenefitInvalidIdException.class,
+            BenefitVersionInvalidIdException.class,
+            BenefitVersionLockedException.class,
+            BenefitInvalidPlanIdException.class,
+            BenefitVersionNullProductionDateException.class,
+            BenefitVersionMajorVersionException.class,
+            BenefitMinorVersionInvalidForDeletingException.class,
+            BenefitMandateVariationException.class,
+            BenefitProgramInvalidException.class,
+            BenefitProgramOverlapException.class,
+            BenefitMandateInvalidException.class,
+            BenefitLockedException.class,
+            BenefitVersionUneditableException.class
+    })
+    public ResponseEntity<BenefitErrorDTO> validationException(final BenefitException e) {
+        log.error("Internal validation exception", e);
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .body(buildResponse(e));
+    }
+
+    @ExceptionHandler({
+            BenefitCodeDuplicateException.class,
+            LegacyBenefitPlanIdLockedException.class
+    })
+    public ResponseEntity<BenefitErrorDTO> duplicateException(final BenefitException e) {
+        log.error("Conflict, resource already exists", e);
+        return ResponseEntity.status(HttpStatus.CONFLICT)
+                .body(buildResponse(e));
+    }
+
+    private BenefitErrorDTO buildResponse(BenefitException e) {
+        return BenefitErrorDTO.builder()
+                .errorCode(e.getErrorCode().getCode())
+                .message(e.getMessage())
+                .entityId(e.getEntityId())
+                .businessId(e.getEntityCode())
+                .build();
+    }
+
+}
